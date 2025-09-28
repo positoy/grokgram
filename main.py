@@ -2,17 +2,17 @@ import os
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from langchain_openai import ChatOpenAI
+from langchain_xai import ChatXAI
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 XAI_API_KEY = os.getenv('XAI_API_KEY')
 
-llm = ChatOpenAI(
-    model="grok-beta",
-    api_key=XAI_API_KEY,
-    base_url="https://api.x.ai/v1",
+llm = ChatXAI(
+    model_name="grok-4-fast-non-reasoning",
+    xai_api_key=XAI_API_KEY,
+    xai_api_base="https://api.x.ai/v1",
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
