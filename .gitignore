@@ -45,3 +45,12 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Vercel
+.vercel/
+.vercel.json
+
+# Node.js (for Vercel CLI)
+node_modules/
+package-lock.json
+yarn.lock
