@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from langchain_xai import ChatXAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from system_prompt import create_system_prompt
 
 load_dotenv()
 
@@ -21,7 +23,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_message = update.message.text
     try:
-        response = llm.invoke(user_message)
+        messages = [
+            SystemMessage(content=create_system_prompt(is_mobile=True, is_subjective=False)),
+            HumanMessage(content=user_message)
+        ]
+        response = llm.invoke(messages)
         await update.message.reply_text(response.content)
     except Exception as e:
         await update.message.reply_text(f'Sorry, something went wrong: {str(e)}')
