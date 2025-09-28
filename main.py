@@ -4,8 +4,35 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from langchain_xai import ChatXAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain.memory import ConversationSummaryBufferMemory
+from langchain_core.chat_history import BaseChatMessageHistory
 from system_prompt import create_system_prompt
+
+class SimpleChatMessageHistory(BaseChatMessageHistory):
+    """간단한 채팅 메시지 히스토리 구현"""
+
+    def __init__(self, max_messages: int = 10):
+        super().__init__()
+        self.messages = []
+        self.max_messages = max_messages
+
+    def add_user_message(self, message: str) -> None:
+        """사용자 메시지 추가"""
+        self.messages.append(HumanMessage(content=message))
+        self._trim_messages()
+
+    def add_ai_message(self, message: str) -> None:
+        """AI 메시지 추가"""
+        self.messages.append(AIMessage(content=message))
+        self._trim_messages()
+
+    def _trim_messages(self) -> None:
+        """최대 메시지 개수를 초과하면 오래된 메시지 제거"""
+        if len(self.messages) > self.max_messages:
+            self.messages = self.messages[-self.max_messages:]
+
+    def clear(self) -> None:
+        """메시지 히스토리 초기화"""
+        self.messages = []
 
 def validate_and_extract_question(user_message: str) -> str | None:
     """
@@ -45,18 +72,30 @@ llm = ChatXAI(
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # 메시지가 없는 업데이트는 무시
+    if not update.message:
+        return
+
     await update.message.reply_text('Hi! I am a Grok-powered bot.')
 
 async def reset_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """사용자의 대화 메모리를 초기화합니다."""
+    # 메시지가 없는 업데이트는 무시
+    if not update.message:
+        return
+
     user_id = update.effective_user.id
-    if user_id in context.user_data and 'memory' in context.user_data[user_id]:
-        context.user_data[user_id]['memory'] = ConversationSummaryBufferMemory(llm=llm, max_token_limit=2000, return_messages=True)
+    if user_id in context.user_data and 'chat_history' in context.user_data[user_id]:
+        context.user_data[user_id]['chat_history'].clear()
         await update.message.reply_text('대화 메모리가 초기화되었습니다. 새로운 대화를 시작합니다!')
     else:
         await update.message.reply_text('초기화할 메모리가 없습니다.')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # 메시지가 없는 업데이트는 무시
+    if not update.message:
+        return
+
     user_message = update.message.text
     user_id = update.effective_user.id
 
@@ -67,24 +106,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        # 사용자별 메모리 초기화 (없으면 생성)
+        # 사용자별 채팅 히스토리 초기화 (없으면 생성)
         if user_id not in context.user_data:
-            context.user_data[user_id] = {'memory': ConversationSummaryBufferMemory(llm=llm, max_token_limit=2000, return_messages=True)}
+            context.user_data[user_id] = {'chat_history': SimpleChatMessageHistory(max_messages=10)}
 
-        memory = context.user_data[user_id]['memory']
+        chat_history = context.user_data[user_id]['chat_history']
 
-        # LLM에 전달할 메시지 구성 (시스템 메시지 + 메모리에서 불러온 대화 히스토리)
+        # 사용자 메시지 추가
+        chat_history.add_user_message(actual_question)
+
+        # LLM에 전달할 메시지 구성 (시스템 메시지 + 채팅 히스토리)
         messages = [
             SystemMessage(content=create_system_prompt(is_mobile=True, is_subjective=False))
-        ] + memory.buffer
-
-        # 새로운 사용자 메시지 추가
-        messages.append(HumanMessage(content=actual_question))
+        ] + chat_history.messages
 
         response = llm.invoke(messages)
 
-        # 메모리에 사용자 메시지와 AI 응답 저장
-        memory.save_context({"input": actual_question}, {"output": response.content})
+        # AI 응답을 히스토리에 추가
+        chat_history.add_ai_message(response.content)
 
         await update.message.reply_text(response.content)
     except Exception as e:
