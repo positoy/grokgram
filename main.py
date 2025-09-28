@@ -6,6 +6,32 @@ from langchain_xai import ChatXAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from system_prompt import create_system_prompt
 
+def validate_and_extract_question(user_message: str) -> str | None:
+    """
+    사용자의 메시지를 검증하고 "1" 다음의 실제 질문을 추출합니다.
+
+    Args:
+        user_message: 사용자가 보낸 원본 메시지
+
+    Returns:
+        검증된 질문 (1로 시작하지 않거나 빈 질문인 경우 None)
+    """
+    # 첫 줄이 "1"로 시작하는지 확인
+    first_line = user_message.split('\n')[0].strip()
+    if not first_line.startswith('1'):
+        return None
+
+    # 첫 줄에서 "1" 부분만 제거하고 나머지 유지
+    lines = user_message.split('\n')
+    actual_question = lines[0][1:]  # 첫 줄에서 "1" 제거
+    if len(lines) > 1:
+        # 여러 줄인 경우 나머지 줄들 붙임
+        actual_question += '\n' + '\n'.join(lines[1:])
+    actual_question = actual_question.strip()
+
+    # 빈 질문인 경우 None 반환
+    return actual_question if actual_question else None
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -22,10 +48,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_message = update.message.text
+
+    # 메시지 검증 및 질문 추출
+    actual_question = validate_and_extract_question(user_message)
+    if actual_question is None:
+        # "1"로 시작하지 않거나 빈 질문인 경우 무시
+        return
+
     try:
         messages = [
             SystemMessage(content=create_system_prompt(is_mobile=True, is_subjective=False)),
-            HumanMessage(content=user_message)
+            HumanMessage(content=actual_question)
         ]
         response = llm.invoke(messages)
         await update.message.reply_text(response.content)
