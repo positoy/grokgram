@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ParseMode
 from langchain_xai import ChatXAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.chat_history import BaseChatMessageHistory
@@ -125,7 +126,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # AI 응답을 히스토리에 추가
         chat_history.add_ai_message(response.content)
 
-        await update.message.reply_text(response.content)
+        await update.message.reply_text(response.content, parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         await update.message.reply_text(f'Sorry, something went wrong: {str(e)}')
 
