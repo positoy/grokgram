@@ -1,7 +1,15 @@
+import asyncio
+import hashlib
+import hmac
+import json
 import os
+from typing import Any
+
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request, status
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import uvicorn
 from langchain_xai import ChatXAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.chat_history import BaseChatMessageHistory
@@ -64,12 +72,184 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 XAI_API_KEY = os.getenv('XAI_API_KEY')
+TELEGRAM_ALERT_CHAT_ID = os.getenv('TELEGRAM_ALERT_CHAT_ID')
+TELEGRAM_GITHUB_ALERT_CHAT_ID = os.getenv('TELEGRAM_GITHUB_ALERT_CHAT_ID') or TELEGRAM_ALERT_CHAT_ID
+RAILWAY_WEBHOOK_SECRET = os.getenv('RAILWAY_WEBHOOK_SECRET')
+GITHUB_WEBHOOK_SECRET = os.getenv('GITHUB_WEBHOOK_SECRET')
+WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', '0.0.0.0')
+WEBHOOK_PORT_RAW = os.getenv('WEBHOOK_PORT', '8000')
+
+try:
+    WEBHOOK_PORT = int(WEBHOOK_PORT_RAW)
+except ValueError as exc:  # noqa: FBT003 - user-provided value, need to fail loudly
+    raise RuntimeError(f"WEBHOOK_PORT must be an integer, got: {WEBHOOK_PORT_RAW}") from exc
 
 llm = ChatXAI(
     model_name="grok-4-fast-non-reasoning",
     xai_api_key=XAI_API_KEY,
     xai_api_base="https://api.x.ai/v1",
 )
+
+def format_railway_message(payload: dict[str, Any]) -> str:
+    """Format a Telegram-friendly message from the Railway webhook payload."""
+
+    project = payload.get('project', {}) or {}
+    environment = payload.get('environment', {}) or {}
+    deployment = payload.get('deployment', {}) or {}
+    service = payload.get('service', {}) or {}
+    change = payload.get('change', {}) or {}
+
+    status_text = (deployment.get('status') or change.get('type') or 'update').replace('_', ' ').title()
+    lines = [f"[Railway] {status_text}"]
+
+    if project_name := project.get('name'):
+        lines.append(f"Project: {project_name}")
+    if env_name := environment.get('name'):
+        lines.append(f"Environment: {env_name}")
+    if service_name := service.get('name'):
+        lines.append(f"Service: {service_name}")
+    if deployment_id := deployment.get('id'):
+        lines.append(f"Deployment ID: {deployment_id}")
+    if url := deployment.get('url'):
+        lines.append(f"URL: {url}")
+    if description := payload.get('description') or change.get('description'):
+        lines.append(f"Description: {description}")
+
+    raw_payload = json.dumps(payload, indent=2, ensure_ascii=True)
+    max_raw_length = 1500
+    if len(raw_payload) > max_raw_length:
+        raw_payload = raw_payload[: max_raw_length - 3] + '...'
+
+    lines.append('')
+    lines.append('Raw payload:')
+    lines.append(raw_payload)
+
+    return '\n'.join(lines)
+
+
+def format_github_pr_message(payload: dict[str, Any]) -> str:
+    """Format a message summarising a GitHub pull request event."""
+
+    action = (payload.get('action') or 'unknown').replace('_', ' ')
+    pull_request = payload.get('pull_request', {}) or {}
+    repository = payload.get('repository', {}) or {}
+    sender = payload.get('sender', {}) or {}
+
+    repo_name = repository.get('full_name') or repository.get('name') or 'Unknown repository'
+    pr_title = pull_request.get('title') or 'Untitled PR'
+    pr_number = pull_request.get('number') or payload.get('number')
+    pr_url = pull_request.get('html_url') or pull_request.get('url')
+    author = (pull_request.get('user') or {}).get('login') or sender.get('login') or 'Unknown user'
+    target_branch = pull_request.get('base', {}).get('ref')
+    source_branch = pull_request.get('head', {}).get('ref')
+    merged = pull_request.get('merged')
+
+    status_line = f"[GitHub] PR {action.title()}"
+    lines = [status_line, f"Repository: {repo_name}"]
+
+    if pr_number is not None:
+        lines.append(f"PR: #{pr_number} - {pr_title}")
+    else:
+        lines.append(f"PR: {pr_title}")
+
+    lines.append(f"Author: {author}")
+
+    if source_branch or target_branch:
+        if source_branch and target_branch:
+            lines.append(f"Branches: {source_branch} -> {target_branch}")
+        elif source_branch:
+            lines.append(f"Source branch: {source_branch}")
+        else:
+            lines.append(f"Target branch: {target_branch}")
+
+    if merged is True:
+        lines.append('Result: merged')
+    elif merged is False:
+        lines.append('Result: not merged')
+
+    if pr_url:
+        lines.append(f"URL: {pr_url}")
+
+    if body := pull_request.get('body'):
+        preview = body.strip().split('\n', 1)[0]
+        if len(preview) > 200:
+            preview = preview[:197] + '...'
+        lines.append(f"PR Body: {preview}")
+
+    raw_payload = json.dumps(payload, indent=2, ensure_ascii=True)
+    max_raw_length = 1500
+    if len(raw_payload) > max_raw_length:
+        raw_payload = raw_payload[: max_raw_length - 3] + '...'
+
+    lines.append('')
+    lines.append('Raw payload:')
+    lines.append(raw_payload)
+
+    return '\n'.join(lines)
+
+
+def create_webhook_app(telegram_app: Application) -> FastAPI:
+    """Create a FastAPI app exposing webhook endpoints."""
+
+    api = FastAPI()
+
+    @api.post('/webhook/railway')
+    async def railway_webhook(request: Request) -> dict[str, str]:
+        if RAILWAY_WEBHOOK_SECRET:
+            provided_secret = request.headers.get('X-Railway-Secret')
+            if provided_secret != RAILWAY_WEBHOOK_SECRET:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid webhook secret')
+
+        try:
+            payload = await request.json()
+        except Exception as exc:  # noqa: BLE001 - FastAPI converts this to 400
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid JSON payload') from exc
+
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Payload must be a JSON object')
+
+        if not TELEGRAM_ALERT_CHAT_ID:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='TELEGRAM_ALERT_CHAT_ID is not configured')
+
+        message = format_railway_message(payload)
+        await telegram_app.bot.send_message(chat_id=TELEGRAM_ALERT_CHAT_ID, text=message)
+
+        return {'status': 'ok'}
+
+    @api.post('/webhook/github/pr')
+    async def github_pr_webhook(request: Request) -> dict[str, str]:
+        if request.headers.get('X-GitHub-Event') != 'pull_request':
+            return {'status': 'ignored', 'reason': 'unsupported event'}
+
+        raw_body = await request.body()
+
+        if GITHUB_WEBHOOK_SECRET:
+            signature = request.headers.get('X-Hub-Signature-256')
+            if not signature:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Missing signature header')
+            computed = hmac.new(GITHUB_WEBHOOK_SECRET.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
+            expected_signature = f'sha256={computed}'
+            if not hmac.compare_digest(expected_signature, signature):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid signature')
+
+        try:
+            payload = json.loads(raw_body.decode('utf-8'))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid JSON payload') from exc
+
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Payload must be a JSON object')
+
+        if not TELEGRAM_GITHUB_ALERT_CHAT_ID:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='TELEGRAM_GITHUB_ALERT_CHAT_ID is not configured')
+
+        message = format_github_pr_message(payload)
+        await telegram_app.bot.send_message(chat_id=TELEGRAM_GITHUB_ALERT_CHAT_ID, text=message)
+
+        return {'status': 'ok'}
+
+    return api
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 메시지가 없는 업데이트는 무시
@@ -129,15 +309,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         await update.message.reply_text(f'Sorry, something went wrong: {str(e)}')
 
-def main() -> None:
+
+async def run_bot(application: Application, stop_event: asyncio.Event) -> None:
+    """Start the Telegram bot and keep it alive until stop_event is set."""
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+
+    try:
+        await stop_event.wait()
+    finally:
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+
+async def run_webhook_server(api_app: FastAPI, stop_event: asyncio.Event) -> None:
+    """Run the FastAPI server that receives webhook calls."""
+
+    config = uvicorn.Config(
+        api_app,
+        host=WEBHOOK_HOST,
+        port=WEBHOOK_PORT,
+        loop='asyncio',
+        log_level=os.getenv('UVICORN_LOG_LEVEL', 'info'),
+    )
+    server = uvicorn.Server(config)
+
+    async def serve() -> None:
+        try:
+            await server.serve()
+        except asyncio.CancelledError:
+            server.should_exit = True
+            raise
+
+    server_task = asyncio.create_task(serve())
+
+    try:
+        await stop_event.wait()
+        server.should_exit = True
+        await server_task
+    finally:
+        if not server_task.done():
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+
+
+async def main_async() -> None:
     if not BOT_TOKEN or not XAI_API_KEY:
-        print("Please set TELEGRAM_BOT_TOKEN and XAI_API_KEY in .env file")
-        return
+        raise RuntimeError('Please set TELEGRAM_BOT_TOKEN and XAI_API_KEY in the environment or .env file')
+
     application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("reset", reset_memory))
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('reset', reset_memory))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    webhook_app = create_webhook_app(application)
+
+    stop_event = asyncio.Event()
+
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(run_bot(application, stop_event))
+            tg.create_task(run_webhook_server(webhook_app, stop_event))
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                stop_event.set()
+                raise
+    finally:
+        stop_event.set()
+
+
+def main() -> None:
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        pass
+
 
 if __name__ == '__main__':
     main()

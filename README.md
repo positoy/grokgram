@@ -18,7 +18,8 @@ A Telegram bot that receives messages and responds using Grok agent via LangChai
 
    ```
    cp .env.example .env
-   # Edit .env with your TELEGRAM_BOT_TOKEN and XAI_API_KEY
+   # Edit .env with your TELEGRAM_BOT_TOKEN, XAI_API_KEY, TELEGRAM_ALERT_CHAT_ID,
+   # and optional webhook configuration values
    ```
 
 3. Run the bot:
@@ -43,9 +44,29 @@ A Telegram bot that receives messages and responds using Grok agent via LangChai
 ## Usage
 
 - Start the bot with `/start` in Telegram.
-- Send any text message, and the bot will respond using Grok.
+- Send a message prefixed with `1` on the first line so the bot treats it as a query.
+
+## Railway Webhook Notifications
+
+- The FastAPI server embedded in `main.py` exposes `POST /webhook/railway` for Railway notifications.
+- Set the following environment variables alongside the existing ones:
+  - `TELEGRAM_ALERT_CHAT_ID`: ID of the chat (user or group) that should receive deployment alerts.
+  - `WEBHOOK_PORT` (optional): Port for the HTTP server (defaults to `8000`).
+  - `WEBHOOK_HOST` (optional): Interface to bind (defaults to `0.0.0.0`).
+  - `RAILWAY_WEBHOOK_SECRET` (optional): Shared secret the webhook must send via the `X-Railway-Secret` header.
+- Configure Railway to send webhooks to `https://<your-host>:<port>/webhook/railway`.
+- The bot will forward the payload summary and the raw JSON body to the Telegram chat specified by `TELEGRAM_ALERT_CHAT_ID`.
+
+## GitHub Pull Request Webhook Notifications
+
+- `POST /webhook/github/pr` accepts GitHub webhooks for the `pull_request` event type.
+- Configure these additional environment variables if needed:
+  - `TELEGRAM_GITHUB_ALERT_CHAT_ID` (optional): Chat ID for GitHub alerts. Falls back to `TELEGRAM_ALERT_CHAT_ID` when unset.
+  - `GITHUB_WEBHOOK_SECRET` (optional): Secret token used to validate the `X-Hub-Signature-256` header.
+- Point your GitHub repository webhook to `https://<your-host>:<port>/webhook/github/pr` and select the **Pull requests** event.
+- The bot will send a concise summary (action, repo, PR title/number, branches) and append the raw JSON payload (truncated to 1.5KB) for debugging.
 
 ## Notes
 
-- The bot uses the `grok-beta` model.
+- The bot uses the `grok-4-fast-non-reasoning` model.
 - Ensure your xAI account has sufficient credits for API usage.

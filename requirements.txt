@@ -1,4 +1,6 @@
-python-dotenv==1.1.1
-python-telegram-bot==22.5
+fastapi==0.115.5
 langchain==0.3.27
 langchain-xai==0.2.5
+python-dotenv==1.1.1
+python-telegram-bot==22.5
+uvicorn==0.32.1
