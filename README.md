@@ -21,10 +21,20 @@ A Telegram bot that receives messages and responds using Grok agent via LangChai
    # Edit .env with your TELEGRAM_BOT_TOKEN and XAI_API_KEY
    ```
 
-3. Run the bot:
+3. (Optional) Configure GitHub Pull Request notifications:
+
+   - Add `GITHUB_PR_CHAT_ID` to `.env` with the Telegram chat ID that should receive
+     alerts when a pull request is opened.
+   - Optionally set `GITHUB_WEBHOOK_HOST` and `GITHUB_WEBHOOK_PORT` to control where
+     the webhook server listens. The default is `0.0.0.0:8000`.
+
+4. Run the bot:
    ```
    python main.py
    ```
+
+   The GitHub webhook endpoint will be available at
+   `http://<host>:<port>/github/webhook`.
 
 ## Obtaining API Keys
 
