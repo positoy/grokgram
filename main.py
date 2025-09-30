@@ -1,4 +1,5 @@
 import os
+import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -60,6 +61,8 @@ def validate_and_extract_question(user_message: str) -> str | None:
     # 빈 질문인 경우 None 반환
     return actual_question if actual_question else None
 
+logging.basicConfig(level=logging.INFO)
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -98,6 +101,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user_message = update.message.text
     user_id = update.effective_user.id
+
+    logging.info(
+        "result.0.message.chat.id: %s",
+        update.effective_chat.id if update.effective_chat else "Unknown",
+    )
 
     # 메시지 검증 및 질문 추출
     actual_question = validate_and_extract_question(user_message)
