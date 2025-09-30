@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 from aiohttp import ContentTypeError, web
@@ -13,6 +14,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from system_prompt import create_system_prompt
+
 
 class SimpleChatMessageHistory(BaseChatMessageHistory):
     """간단한 채팅 메시지 히스토리 구현"""
@@ -41,6 +43,7 @@ class SimpleChatMessageHistory(BaseChatMessageHistory):
         """메시지 히스토리 초기화"""
         self.messages = []
 
+
 def validate_and_extract_question(user_message: str) -> str | None:
     """
     사용자의 메시지를 검증하고 "1" 다음의 실제 질문을 추출합니다.
@@ -67,18 +70,22 @@ def validate_and_extract_question(user_message: str) -> str | None:
     # 빈 질문인 경우 None 반환
     return actual_question if actual_question else None
 
+
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-XAI_API_KEY = os.getenv('XAI_API_KEY')
-GITHUB_CHAT_ID_ENV = os.getenv('GITHUB_PR_CHAT_ID')
-WEBHOOK_HOST = os.getenv('GITHUB_WEBHOOK_HOST', '0.0.0.0')
-WEBHOOK_PORT = int(os.getenv('GITHUB_WEBHOOK_PORT', '8000'))
 
-telegram_application: Optional[Application] = None
-webhook_runner: Optional[web.AppRunner] = None
+@dataclass(frozen=True)
+class BotConfig:
+    """봇 실행에 필요한 설정 값 모음."""
+
+    telegram_token: str
+    xai_api_key: str
+    github_chat_id: Optional[int]
+    webhook_host: str
+    webhook_port: int
+
 
 def _parse_chat_id(chat_id_env: Optional[str]) -> Optional[int]:
     """환경 변수에서 읽은 채팅 ID를 정수로 변환합니다."""
@@ -93,67 +100,53 @@ def _parse_chat_id(chat_id_env: Optional[str]) -> Optional[int]:
         return None
 
 
-GITHUB_CHAT_ID = _parse_chat_id(GITHUB_CHAT_ID_ENV)
+def _parse_port(port_env: Optional[str]) -> int:
+    """포트 환경 변수를 정수로 파싱합니다."""
 
-llm = ChatXAI(
-    model_name="grok-4-fast-non-reasoning",
-    xai_api_key=XAI_API_KEY,
-    xai_api_base="https://api.x.ai/v1",
-)
-
-
-async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
-    """GitHub Pull Request 웹훅을 처리합니다."""
-
-    if GITHUB_CHAT_ID is None:
-        logging.warning("GITHUB_PR_CHAT_ID가 설정되지 않아 웹훅 알림을 보낼 수 없습니다.")
-        return web.Response(status=503, text='Chat ID not configured')
-
-    if telegram_application is None:
-        logging.warning("텔레그램 애플리케이션이 아직 초기화되지 않았습니다.")
-        return web.Response(status=503, text='Bot not ready')
+    if not port_env:
+        return 8000
 
     try:
-        payload = await request.json()
-    except (json.JSONDecodeError, ContentTypeError):
-        logging.exception("잘못된 JSON 페이로드입니다.")
-        return web.Response(status=400, text='Invalid JSON payload')
+        port = int(port_env)
+    except ValueError:
+        logging.error("잘못된 GITHUB_WEBHOOK_PORT 값입니다: %s", port_env)
+        return 8000
 
-    action = payload.get('action')
-    pull_request = payload.get('pull_request')
+    if not 0 <= port <= 65535:
+        logging.error("지원하지 않는 포트 범위입니다: %s", port)
+        return 8000
 
-    # pull_request 필드가 없는 이벤트는 무시합니다.
-    if not pull_request:
-        return web.Response(status=200, text='Event ignored')
+    return port
 
-    if action not in {'opened', 'reopened'}:
-        logging.info("지원하지 않는 PR 액션입니다: %s", action)
-        return web.Response(status=200, text='Action ignored')
 
-    repo_info = payload.get('repository', {})
-    sender_info = payload.get('sender', {})
+def load_config() -> Optional[BotConfig]:
+    """환경 변수에서 봇 설정을 로드합니다."""
 
-    repo_name = repo_info.get('full_name', '알 수 없는 저장소')
-    pr_title = pull_request.get('title', '제목 없음')
-    pr_url = pull_request.get('html_url', '')
-    sender_login = sender_info.get('login')
+    telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    xai_api_key = os.getenv('XAI_API_KEY')
 
-    message_lines = [f"📣 {repo_name} 저장소에 새로운 Pull Request가 생성되었습니다."]
-    message_lines.append(f"제목: {pr_title}")
-    if sender_login:
-        message_lines.append(f"작성자: {sender_login}")
-    if pr_url:
-        message_lines.append(pr_url)
+    missing: list[str] = []
+    if not telegram_token:
+        missing.append('TELEGRAM_BOT_TOKEN')
+    if not xai_api_key:
+        missing.append('XAI_API_KEY')
 
-    message = '\n'.join(message_lines)
+    if missing:
+        logging.error("필수 환경 변수가 설정되지 않았습니다: %s", ', '.join(missing))
+        return None
 
-    try:
-        await telegram_application.bot.send_message(chat_id=GITHUB_CHAT_ID, text=message)
-    except Exception:
-        logging.exception("GitHub PR 알림 전송 중 오류가 발생했습니다.")
-        return web.Response(status=500, text='Failed to send message')
+    github_chat_id = _parse_chat_id(os.getenv('GITHUB_PR_CHAT_ID'))
+    webhook_host = os.getenv('GITHUB_WEBHOOK_HOST', '0.0.0.0')
+    webhook_port = _parse_port(os.getenv('GITHUB_WEBHOOK_PORT'))
 
-    return web.Response(status=200, text='Notification sent')
+    return BotConfig(
+        telegram_token=telegram_token,
+        xai_api_key=xai_api_key,
+        github_chat_id=github_chat_id,
+        webhook_host=webhook_host,
+        webhook_port=webhook_port,
+    )
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 메시지가 없는 업데이트는 무시
@@ -161,6 +154,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text('Hi! I am a Grok-powered bot.')
+
 
 async def reset_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """사용자의 대화 메모리를 초기화합니다."""
@@ -174,6 +168,7 @@ async def reset_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text('대화 메모리가 초기화되었습니다. 새로운 대화를 시작합니다!')
     else:
         await update.message.reply_text('초기화할 메모리가 없습니다.')
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 메시지가 없는 업데이트는 무시
@@ -209,7 +204,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             SystemMessage(content=create_system_prompt(is_mobile=True, is_subjective=False))
         ] + chat_history.messages
 
-        response = llm.invoke(messages)
+        llm_obj = context.bot_data.get('llm')
+        if not isinstance(llm_obj, ChatXAI):
+            logging.error("LLM 인스턴스가 초기화되지 않았습니다.")
+            await update.message.reply_text('Sorry, the bot is not ready yet.')
+            return
+
+        response = await asyncio.to_thread(llm_obj.invoke, messages)
 
         # AI 응답을 히스토리에 추가
         chat_history.add_ai_message(response.content)
@@ -218,65 +219,169 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         await update.message.reply_text(f'Sorry, something went wrong: {str(e)}')
 
-async def start_webhook_server() -> None:
-    """GitHub 웹훅 서버를 시작합니다."""
 
-    global webhook_runner
+class BotRuntime:
+    """텔레그램 봇과 GitHub 웹훅 서버 실행을 관리합니다."""
 
-    if webhook_runner is not None:
-        logging.debug("GitHub 웹훅 서버가 이미 실행 중입니다.")
-        return
+    def __init__(self, config: BotConfig):
+        self._config = config
+        self._webhook_runner: Optional[web.AppRunner] = None
+        self._bot_ready = asyncio.Event()
 
-    github_app = web.Application()
-    github_app.router.add_post('/github/webhook', handle_github_webhook)
+        self.telegram_application = self._create_telegram_application()
+        self.web_app = web.Application()
+        self.web_app.router.add_post('/github/webhook', self._handle_github_webhook)
 
-    webhook_runner = web.AppRunner(github_app)
-    await webhook_runner.setup()
+    def _create_telegram_application(self) -> Application:
+        """텔레그램 애플리케이션을 생성하고 핸들러를 등록합니다."""
 
-    site = web.TCPSite(webhook_runner, host=WEBHOOK_HOST, port=WEBHOOK_PORT)
-    await site.start()
+        application = (
+            Application.builder()
+            .token(self._config.telegram_token)
+            .post_init(self._on_post_init)
+            .build()
+        )
 
-    logging.info(
-        "GitHub 웹훅 서버가 시작되었습니다: http://%s:%s/github/webhook",
-        WEBHOOK_HOST,
-        WEBHOOK_PORT,
-    )
+        application.bot_data['llm'] = ChatXAI(
+            model_name="grok-4-fast-non-reasoning",
+            xai_api_key=self._config.xai_api_key,
+            xai_api_base="https://api.x.ai/v1",
+        )
 
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("reset", reset_memory))
+        application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+        )
 
-async def stop_webhook_server() -> None:
-    """GitHub 웹훅 서버를 종료합니다."""
+        return application
 
-    global webhook_runner
+    async def _on_post_init(self, application: Application) -> None:
+        """텔레그램 봇이 초기화된 후 호출되어 준비 상태를 표시합니다."""
 
-    if webhook_runner is None:
-        return
+        logging.info("텔레그램 애플리케이션 초기화 완료")
+        self._bot_ready.set()
 
-    await webhook_runner.cleanup()
-    webhook_runner = None
+    async def _handle_github_webhook(self, request: web.Request) -> web.StreamResponse:
+        """GitHub Pull Request 웹훅을 처리합니다."""
+
+        if self._config.github_chat_id is None:
+            logging.warning(
+                "GITHUB_PR_CHAT_ID가 설정되지 않아 웹훅 알림을 보낼 수 없습니다."
+            )
+            return web.Response(status=200, text='Chat ID not configured')
+
+        if not self._bot_ready.is_set():
+            logging.warning("텔레그램 애플리케이션이 아직 초기화되지 않았습니다.")
+            return web.Response(status=503, text='Bot not ready')
+
+        event_type = request.headers.get('X-GitHub-Event')
+        if event_type == 'ping':
+            return web.Response(status=200, text='pong')
+
+        if event_type and event_type != 'pull_request':
+            logging.debug("지원하지 않는 GitHub 이벤트입니다: %s", event_type)
+            return web.Response(status=200, text='Event ignored')
+
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, ContentTypeError):
+            logging.exception("잘못된 JSON 페이로드입니다.")
+            return web.Response(status=400, text='Invalid JSON payload')
+
+        action = payload.get('action')
+        pull_request = payload.get('pull_request')
+
+        # pull_request 필드가 없는 이벤트는 무시합니다.
+        if not pull_request:
+            return web.Response(status=200, text='Event ignored')
+
+        if action not in {'opened', 'reopened'}:
+            logging.info("지원하지 않는 PR 액션입니다: %s", action)
+            return web.Response(status=200, text='Action ignored')
+
+        repo_info = payload.get('repository', {})
+        sender_info = payload.get('sender', {})
+
+        repo_name = repo_info.get('full_name', '알 수 없는 저장소')
+        pr_title = pull_request.get('title', '제목 없음')
+        pr_url = pull_request.get('html_url', '')
+        sender_login = sender_info.get('login')
+
+        message_lines = [f"📣 {repo_name} 저장소에 새로운 Pull Request가 생성되었습니다."]
+        message_lines.append(f"제목: {pr_title}")
+        if sender_login:
+            message_lines.append(f"작성자: {sender_login}")
+        if pr_url:
+            message_lines.append(pr_url)
+
+        message = '\n'.join(message_lines)
+
+        try:
+            await self.telegram_application.bot.send_message(
+                chat_id=self._config.github_chat_id,
+                text=message,
+            )
+        except Exception:
+            logging.exception("GitHub PR 알림 전송 중 오류가 발생했습니다.")
+            return web.Response(status=500, text='Failed to send message')
+
+        return web.Response(status=200, text='Notification sent')
+
+    async def start_webhook_server(self) -> None:
+        """GitHub 웹훅 서버를 시작합니다."""
+
+        if self._webhook_runner is not None:
+            logging.debug("GitHub 웹훅 서버가 이미 실행 중입니다.")
+            return
+
+        self._webhook_runner = web.AppRunner(self.web_app)
+        await self._webhook_runner.setup()
+
+        site = web.TCPSite(
+            self._webhook_runner,
+            host=self._config.webhook_host,
+            port=self._config.webhook_port,
+        )
+        await site.start()
+
+        logging.info(
+            "GitHub 웹훅 서버가 시작되었습니다: http://%s:%s/github/webhook",
+            self._config.webhook_host,
+            self._config.webhook_port,
+        )
+
+    async def stop_webhook_server(self) -> None:
+        """GitHub 웹훅 서버를 종료합니다."""
+
+        if self._webhook_runner is None:
+            return
+
+        await self._webhook_runner.cleanup()
+        self._webhook_runner = None
+
+    async def run(self) -> None:
+        """텔레그램 봇과 웹훅 서버를 실행합니다."""
+
+        await self.start_webhook_server()
+
+        try:
+            await self.telegram_application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                close_loop=False,
+            )
+        finally:
+            await self.stop_webhook_server()
 
 
 async def main() -> None:
-    if not BOT_TOKEN or not XAI_API_KEY:
+    config = load_config()
+    if config is None:
         print("Please set TELEGRAM_BOT_TOKEN and XAI_API_KEY in .env file")
         return
 
-    global telegram_application
-    telegram_application = Application.builder().token(BOT_TOKEN).build()
-    telegram_application.add_handler(CommandHandler("start", start))
-    telegram_application.add_handler(CommandHandler("reset", reset_memory))
-    telegram_application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-
-    await start_webhook_server()
-
-    try:
-        await telegram_application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            close_loop=False,
-        )
-    finally:
-        await stop_webhook_server()
+    runtime = BotRuntime(config)
+    await runtime.run()
 
 
 if __name__ == '__main__':

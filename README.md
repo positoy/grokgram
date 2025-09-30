@@ -27,14 +27,13 @@ A Telegram bot that receives messages and responds using Grok agent via LangChai
      alerts when a pull request is opened.
    - Optionally set `GITHUB_WEBHOOK_HOST` and `GITHUB_WEBHOOK_PORT` to control where
      the webhook server listens. The default is `0.0.0.0:8000`.
+   - Point your GitHub repository webhook to `http://<host>:<port>/github/webhook`
+     and select the **Pull requests** event.
 
 4. Run the bot:
    ```
    python main.py
    ```
-
-   The GitHub webhook endpoint will be available at
-   `http://<host>:<port>/github/webhook`.
 
 ## Obtaining API Keys
 
