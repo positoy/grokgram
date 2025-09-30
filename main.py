@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import os
@@ -223,6 +222,10 @@ async def start_webhook_server() -> None:
 
     global webhook_runner
 
+    if webhook_runner is not None:
+        logging.info("웹훅 서버가 이미 실행 중입니다.")
+        return
+
     github_app = web.Application()
     github_app.router.add_post('/github/webhook', handle_github_webhook)
 
@@ -242,32 +245,48 @@ async def start_webhook_server() -> None:
 async def stop_webhook_server() -> None:
     """GitHub 웹훅 서버를 종료합니다."""
 
+    global webhook_runner
+
     if webhook_runner is None:
         return
 
     await webhook_runner.cleanup()
+    webhook_runner = None
 
 
-async def main() -> None:
+async def on_application_post_init(_application: Application) -> None:
+    """텔레그램 애플리케이션 초기화 후 웹훅 서버를 시작합니다."""
+
+    await start_webhook_server()
+
+
+async def on_application_post_shutdown(_application: Application) -> None:
+    """텔레그램 애플리케이션 종료 시 웹훅 서버를 정리합니다."""
+
+    await stop_webhook_server()
+
+
+def main() -> None:
     if not BOT_TOKEN or not XAI_API_KEY:
         print("Please set TELEGRAM_BOT_TOKEN and XAI_API_KEY in .env file")
         return
 
     global telegram_application
-    telegram_application = Application.builder().token(BOT_TOKEN).build()
+    telegram_application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(on_application_post_init)
+        .post_shutdown(on_application_post_shutdown)
+        .build()
+    )
     telegram_application.add_handler(CommandHandler("start", start))
     telegram_application.add_handler(CommandHandler("reset", reset_memory))
     telegram_application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    await start_webhook_server()
-
-    try:
-        await telegram_application.run_polling(allowed_updates=Update.ALL_TYPES)
-    finally:
-        await stop_webhook_server()
+    telegram_application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
