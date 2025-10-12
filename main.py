@@ -13,35 +13,18 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from system_prompt import create_system_prompt
 
-def validate_and_extract_question(user_message: str) -> str | None:
-    """
-    사용자의 메시지를 검증하고 "1" 다음의 실제 질문을 추출합니다.
-
-    Args:
-        user_message: 사용자가 보낸 원본 메시지
-
-    Returns:
-        검증된 질문 (1로 시작하지 않거나 빈 질문인 경우 None)
-    """
-    # 첫 줄이 "1"로 시작하는지 확인
-    first_line = user_message.split('\n')[0].strip()
-    if not first_line.startswith('1'):
-        return None
-
-    # 첫 줄에서 "1" 부분만 제거하고 나머지 유지
-    lines = user_message.split('\n')
-    actual_question = lines[0][1:]  # 첫 줄에서 "1" 제거
-    if len(lines) > 1:
-        # 여러 줄인 경우 나머지 줄들 붙임
-        actual_question += '\n' + '\n'.join(lines[1:])
-    actual_question = actual_question.strip()
-
-    # 빈 질문인 경우 None 반환
-    return actual_question if actual_question else None
-
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
+
+WHITELIST_USER_IDS_ENV = os.getenv('WHITELIST_USER_IDS')
+WHITELIST_USER_IDS = []
+if WHITELIST_USER_IDS_ENV:
+    try:
+        WHITELIST_USER_IDS = [int(id.strip()) for id in WHITELIST_USER_IDS_ENV.split(',')]
+    except ValueError:
+        logging.error("Invalid WHITELIST_USER_IDS format: %s", WHITELIST_USER_IDS_ENV)
+        WHITELIST_USER_IDS = []
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 XAI_API_KEY = os.getenv('XAI_API_KEY')
@@ -77,13 +60,21 @@ llm = ChatXAI(
 async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     """GitHub Pull Request 웹훅을 처리합니다."""
 
-    if GITHUB_CHAT_ID is None:
-        logging.warning("GITHUB_PR_CHAT_ID가 설정되지 않아 웹훅 알림을 보낼 수 없습니다.")
-        return web.Response(status=503, text='Chat ID not configured')
+    if not WHITELIST_USER_IDS:
+        logging.warning("WHITELIST_USER_IDS가 설정되지 않아 웹훅 알림을 보낼 수 없습니다.")
+        return web.Response(status=503, text='Whitelist not configured')
 
     if telegram_application is None:
         logging.warning("텔레그램 애플리케이션이 아직 초기화되지 않았습니다.")
         return web.Response(status=503, text='Bot not ready')
+
+    # log body of the request
+    logging.info("request body: %s", await request.text())
+
+    # send the log body to the whitelist user ids
+    for user_id in WHITELIST_USER_IDS:
+        await telegram_application.bot.send_message(chat_id=user_id, text=await request.text())
+    return web.Response(status=200, text='Notification sent')
 
     try:
         payload = await request.json()
@@ -117,16 +108,15 @@ async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     if pr_url:
         message_lines.append(pr_url)
 
-    message = '\n'.join(message_lines)
 
     try:
-        await telegram_application.bot.send_message(chat_id=GITHUB_CHAT_ID, text=message)
+        for user_id in WHITELIST_USER_IDS:
+            await telegram_application.bot.send_message(chat_id=user_id, text=message)
     except Exception:
         logging.exception("GitHub PR 알림 전송 중 오류가 발생했습니다.")
         return web.Response(status=500, text='Failed to send message')
 
     return web.Response(status=200, text='Notification sent')
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 메시지가 없는 업데이트는 무시
     if not update.message:
@@ -155,15 +145,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_message = update.message.text
     user_id = update.effective_user.id
 
+    logging.info("user_id: %s", user_id)
     logging.info(
         "result.0.message.chat.id: %s",
         update.effective_chat.id if update.effective_chat else "Unknown",
     )
 
-    # 메시지 검증 및 질문 추출
-    actual_question = validate_and_extract_question(user_message)
-    if actual_question is None:
-        # "1"로 시작하지 않거나 빈 질문인 경우 무시
+    # 화이트리스트 체크
+    if user_id not in WHITELIST_USER_IDS:
         return
 
     try:
@@ -174,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         chat_memory = context.user_data[user_id]['chat_memory']
 
         # 사용자 메시지 추가
-        chat_memory.chat_memory.add_user_message(actual_question)
+        chat_memory.chat_memory.add_user_message(user_message)
 
         # LLM에 전달할 메시지 구성 (시스템 메시지 + 채팅 히스토리)
         messages = [
