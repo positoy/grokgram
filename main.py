@@ -1,12 +1,14 @@
 import json
+from tools import get_current_time
 import logging
 import os
 from typing import Optional
 
 from aiohttp import ContentTypeError, web
 from dotenv import load_dotenv
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain.memory import ConversationSummaryMemory
+from langchain.tools import tool
 from langchain_xai import ChatXAI
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -56,6 +58,8 @@ llm = ChatXAI(
     xai_api_base="https://api.x.ai/v1",
 )
 
+tools = [get_current_time]
+llm_with_tools = llm.bind_tools(tools)
 
 async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     """GitHub Pull Request 웹훅을 처리합니다."""
@@ -164,7 +168,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             SystemMessage(content=create_system_prompt(is_mobile=True, is_subjective=False))
         ] + chat_memory.chat_memory.messages
 
-        response = llm.invoke(messages)
+        response = llm_with_tools.invoke(messages)
+
+
+        # tool calls 처리
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                tool_name = tool_call['name']
+                tool_args = tool_call['args']
+                tool_call_id = tool_call['id']
+                if tool_name == 'get_current_time':
+                    tool_result = get_current_time.invoke(tool_args)
+                tool_message = ToolMessage(content=tool_result, tool_call_id=tool_call_id)
+                chat_memory.chat_memory.add_message(tool_message)
+            # 다시 invoke
+            messages = [
+                SystemMessage(content=create_system_prompt(is_mobile=True, is_subjective=False))
+            ] + chat_memory.chat_memory.messages
+            response = llm_with_tools.invoke(messages)
 
         # AI 응답을 히스토리에 추가
         chat_memory.chat_memory.add_ai_message(response.content)
