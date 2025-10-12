@@ -60,13 +60,21 @@ llm = ChatXAI(
 async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     """GitHub Pull Request 웹훅을 처리합니다."""
 
-    if GITHUB_CHAT_ID is None:
-        logging.warning("GITHUB_PR_CHAT_ID가 설정되지 않아 웹훅 알림을 보낼 수 없습니다.")
-        return web.Response(status=503, text='Chat ID not configured')
+    if not WHITELIST_USER_IDS:
+        logging.warning("WHITELIST_USER_IDS가 설정되지 않아 웹훅 알림을 보낼 수 없습니다.")
+        return web.Response(status=503, text='Whitelist not configured')
 
     if telegram_application is None:
         logging.warning("텔레그램 애플리케이션이 아직 초기화되지 않았습니다.")
         return web.Response(status=503, text='Bot not ready')
+
+    # log body of the request
+    logging.info("request body: %s", await request.text())
+
+    # send the log body to the whitelist user ids
+    for user_id in WHITELIST_USER_IDS:
+        await telegram_application.bot.send_message(chat_id=user_id, text=await request.text())
+    return web.Response(status=200, text='Notification sent')
 
     try:
         payload = await request.json()
@@ -100,16 +108,15 @@ async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     if pr_url:
         message_lines.append(pr_url)
 
-    message = '\n'.join(message_lines)
 
     try:
-        await telegram_application.bot.send_message(chat_id=GITHUB_CHAT_ID, text=message)
+        for user_id in WHITELIST_USER_IDS:
+            await telegram_application.bot.send_message(chat_id=user_id, text=message)
     except Exception:
         logging.exception("GitHub PR 알림 전송 중 오류가 발생했습니다.")
         return web.Response(status=500, text='Failed to send message')
 
     return web.Response(status=200, text='Notification sent')
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 메시지가 없는 업데이트는 무시
     if not update.message:
