@@ -77,8 +77,8 @@ async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     # return web.Response(status=200, text='Notification sent')
 
     try:
-        payload = await request.json()
-    except (json.JSONDecodeError, ContentTypeError):
+        payload = json.loads(await request.text())
+    except json.JSONDecodeError:
         logging.exception("잘못된 JSON 페이로드입니다.")
         return web.Response(status=400, text='Invalid JSON payload')
 
