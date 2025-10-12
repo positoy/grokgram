@@ -71,11 +71,6 @@ async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     # log body of the request
     logging.info("request body: %s", await request.text())
 
-    # send the log body to the whitelist user ids
-    for user_id in WHITELIST_USER_IDS:
-        await telegram_application.bot.send_message(chat_id=user_id, text=await request.text())
-    return web.Response(status=200, text='Notification sent')
-
     try:
         payload = await request.json()
     except (json.JSONDecodeError, ContentTypeError):
@@ -108,10 +103,9 @@ async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     if pr_url:
         message_lines.append(pr_url)
 
-
     try:
         for user_id in WHITELIST_USER_IDS:
-            await telegram_application.bot.send_message(chat_id=user_id, text=message)
+            await telegram_application.bot.send_message(chat_id=user_id, text='\n'.join(message_lines))
     except Exception:
         logging.exception("GitHub PR 알림 전송 중 오류가 발생했습니다.")
         return web.Response(status=500, text='Failed to send message')
