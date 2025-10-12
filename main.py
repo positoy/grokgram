@@ -72,9 +72,9 @@ async def handle_github_webhook(request: web.Request) -> web.StreamResponse:
     logging.info("request body: %s", await request.text())
 
     # send the log body to the whitelist user ids
-    for user_id in WHITELIST_USER_IDS:
-        await telegram_application.bot.send_message(chat_id=user_id, text=await request.text())
-    return web.Response(status=200, text='Notification sent')
+    # for user_id in WHITELIST_USER_IDS:
+    #     await telegram_application.bot.send_message(chat_id=user_id, text=await request.text())
+    # return web.Response(status=200, text='Notification sent')
 
     try:
         payload = await request.json()
